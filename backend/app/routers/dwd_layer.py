@@ -68,7 +68,7 @@ def export_entries(
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条明细表明细；不存在时给出可读的错误说明。"""
-    entry = service.get_entry(entry_id)
+    entry = service.get_entry_detail(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"明细表 {entry_id} 不存在或已归档")
     return entry
@@ -107,3 +107,37 @@ def get_table_data(entry_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"明细表 {entry_id} 不存在")
     data = service.get_table_data(entry.get("表名称", ""))
     return {"items": data}
+
+
+@router.get("/{entry_id}/dedup")
+def get_dedup_dataset(
+    entry_id: int,
+    page: int = Query(default=1, description="页码，越界会被拒绝"),
+    size: int = Query(default=20, ge=1, le=200),
+) -> dict[str, Any]:
+    """按业务键顺序回查该明细表消费的去重明细数据集；页码越界返回 400。"""
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"明细表 {entry_id} 不存在")
+    config_no = str(entry.get("去重配置") or "")
+    if not config_no:
+        raise HTTPException(status_code=404, detail=f"明细表 {entry_id} 未关联去重配置")
+    from app.services.dedup_config import DatasetPageOutOfRange, DedupConfigService
+    ds = DedupConfigService()
+    config_id = service.dedup_config_id(entry)
+    config = ds.get_entry(config_id) if config_id else None
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"去重配置 {config_no} 不存在")
+    try:
+        payload = ds.dataset_page(int(config["id"]), page=page, size=size)
+    except DatasetPageOutOfRange as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"页码越界：请求第 {error.page} 页，数据集共 {error.page_count} 页（{error.total} 个业务键）",
+        ) from error
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"明细表 {entry_id} 尚未生成去重明细数据集，请先执行构建",
+        )
+    return payload

@@ -33,6 +33,13 @@ body { margin: 0; background: #f6f8fb; color: #1f2937; }
 .link { border: none; background: none; color: var(--brand); cursor: pointer; padding: 0; }
 .page-foot { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--muted); }
 .error-text { color: #b42318; }
+.detail-panel { margin-top: 14px; background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.detail-panel h3 { margin: 4px 0 6px; font-size: 15px; }
+.detail-panel h4 { margin: 10px 0 6px; font-size: 13px; color: var(--muted); }
+.data-table.small th, .data-table.small td { padding: 5px 8px; font-size: 12px; }
+.dataset-warnings ul { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+.dataset-warnings li { margin-bottom: 3px; }
+.page-input { width: 64px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; }
 .modal-backdrop { position: fixed; inset: 0; background: rgb(15 23 42 / 35%); display: grid; place-items: center; padding: 20px; z-index: 20; }
 .modal { width: min(560px, 100%); max-height: 90vh; overflow: auto; background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 20px 50px rgb(15 23 42 / 20%); }
 .create-field { display: block; margin-bottom: 10px; }

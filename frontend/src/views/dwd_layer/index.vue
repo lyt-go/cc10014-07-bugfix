@@ -30,13 +30,14 @@
     <table class="data-table">
       <thead>
         <tr>
-          <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th v-for="column in [...columns, ...datasetColumns]" :key="column">{{ column }}</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in datasetColumns" :key="column">{{ row[column] ?? '—' }}</td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -48,10 +49,27 @@
             >
               {{ action }}
             </button>
+            <button
+              class="link"
+              type="button"
+              :data-testid="`build-${row.id}`"
+              :disabled="buildingId === row.id"
+              @click="build(row)"
+            >
+              {{ buildingId === row.id ? '构建中…' : '构建明细' }}
+            </button>
+            <button
+              class="link"
+              type="button"
+              :data-testid="`dedup-${row.id}`"
+              @click="openDedup(row)"
+            >
+              回查去重明细数据集
+            </button>
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无明细层管理数据，可先登记明细表</td>
+          <td :colspan="columns.length + datasetColumns.length + 1" class="empty-state">暂无明细层管理数据，可先登记明细表</td>
         </tr>
       </tbody>
     </table>
@@ -72,6 +90,45 @@
       </form>
     </div>
 
+    <div v-if="dedup" class="detail-panel" data-testid="dedup-panel">
+      <h3>去重明细数据集：{{ dedup.config_no }}（{{ dedup.config_version }}）</h3>
+      <p class="page-desc">
+        每条业务键只保留一条可追溯记录；去重水位 {{ dedup.watermark || '—' }}，
+        业务键 {{ dedup.key_count }} 个，保留记录 {{ dedup.retained_count }} 条。
+      </p>
+      <p v-if="dedup.stale" class="error-text" data-testid="dedup-stale">
+        配置已升级至 {{ dedup.current_config_version }}，数据集仍按 {{ dedup.config_version }} 落地结果展示。
+      </p>
+      <div class="page-actions">
+        <button class="btn ghost" data-testid="dedup-close" type="button" @click="dedup = null">关闭</button>
+      </div>
+      <table class="data-table small">
+        <thead>
+          <tr><th>#</th><th>业务键</th><th>排序值</th><th>保留记录</th><th>重复数</th><th>冲突</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in dedup.items" :key="item.business_key">
+            <td>{{ item.seq }}</td>
+            <td>{{ item.business_key }}</td>
+            <td>{{ item.sort_value ?? '—' }}</td>
+            <td>{{ describeRecord(item.retained) }}</td>
+            <td>{{ item.duplicate_count }}</td>
+            <td>{{ item.conflict ? '相同时间' : '—' }}</td>
+          </tr>
+          <tr v-if="!dedup.items.length">
+            <td colspan="6" class="empty-state">该明细表尚未生成去重明细数据集，可先执行构建明细</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="page-foot">
+        <span>第 {{ dedup.page }} / {{ dedup.page_count }} 页，共 {{ dedup.total }} 个业务键</span>
+        <span class="row-actions">
+          <button class="link" data-testid="dedup-prev" type="button" :disabled="dedup.page <= 1" @click="dedupPage(dedup.page - 1)">上一页</button>
+          <button class="link" data-testid="dedup-next" type="button" :disabled="dedup.page >= dedup.page_count" @click="dedupPage(dedup.page + 1)">下一页</button>
+        </span>
+      </div>
+    </div>
+
     <footer class="page-foot">
       <span>共 {{ total }} 条明细层管理记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
@@ -86,8 +143,32 @@ import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
 
+type DedupKey = {
+  seq: number
+  business_key: string
+  sort_value: string | number | null
+  retained: Record<string, unknown>
+  duplicate_count: number
+  conflict: boolean
+}
+
+type DedupDataset = {
+  config_no: string
+  config_version: string
+  current_config_version: string
+  stale: boolean
+  watermark: string
+  key_count: number
+  retained_count: number
+  items: DedupKey[]
+  total: number
+  page: number
+  page_count: number
+}
+
 const ENDPOINT = '/api/dwd_layer'
 const columns = ["表编号", "父层来源", "表名称", "粒度说明", "分区字段", "关联键列", "刷新水位", "创建批次"]
+const datasetColumns = ["去重水位", "业务键数量", "去重明细数据集版本"]
 const actions = ["提交校验", "确认上线", "标记下线"]
 const statuses = ["草稿", "待校验", "已上线", "已下线"]
 const metricNames = ["明细表总数", "待校验表", "已上线表"]
@@ -100,6 +181,10 @@ const filterFields = columns.slice(0, 3)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+const dedup = ref<DedupDataset | null>(null)
+const dedupEntryId = ref<number | null>(null)
+const buildingId = ref<number | null>(null)
+const dedupPageSize = 10
 const stats = computed(() => [
   { label: metricNames[0], value: total.value },
   { label: metricNames[1], value: rows.value.filter((row) => row.status === statuses[1]).length },
@@ -159,12 +244,62 @@ async function runAction(action: string, row: Row) {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
+    const payload = await response.json()
     if (!response.ok) {
-      throw new Error('明细层管理动作未生效，请稍后重试')
+      throw new Error(payload.detail || '明细层管理动作未生效，请稍后重试')
     }
     await reload()
+    if (dedupEntryId.value === Number(row.id)) await loadDedup(dedup.value?.page ?? 1)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '明细层管理操作失败'
+  }
+}
+
+function describeRecord(record: Record<string, unknown> | undefined): string {
+  if (!record) return '—'
+  return Object.entries(record)
+    .map(([key, value]) => `${key}=${value ?? ''}`)
+    .join('，')
+}
+
+async function build(row: Row) {
+  buildingId.value = Number(row.id)
+  errorMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/${row.id}/build`, { method: 'POST' })
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) throw new Error(payload.message || '构建失败')
+    await reload()
+    if (dedupEntryId.value === Number(row.id)) await loadDedup(dedup.value?.page ?? 1)
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '构建失败'
+  } finally {
+    buildingId.value = null
+  }
+}
+
+async function openDedup(row: Row) {
+  dedupEntryId.value = Number(row.id)
+  await loadDedup(1)
+}
+
+async function dedupPage(page: number) {
+  await loadDedup(page)
+}
+
+async function loadDedup(page: number) {
+  if (dedupEntryId.value === null) return
+  errorMessage.value = ''
+  try {
+    const response = await request(
+      `${ENDPOINT}/${dedupEntryId.value}/dedup?page=${page}&size=${dedupPageSize}`,
+    )
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.detail || '去重明细数据集读取失败')
+    dedup.value = payload as DedupDataset
+  } catch (error) {
+    dedup.value = null
+    errorMessage.value = error instanceof Error ? error.message : '去重明细数据集读取失败'
   }
 }
 

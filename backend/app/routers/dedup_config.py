@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
-from app.services.dedup_config import DedupConfigService
+from app.services.dedup_config import DatasetPageOutOfRange, DedupConfigService
 
 router = APIRouter(prefix="/api/dedup_config", tags=["去重配置"])
 
@@ -68,10 +68,98 @@ def export_entries(
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条去重配置明细；不存在时给出可读的错误说明。"""
-    entry = service.get_entry(entry_id)
+    entry = service.get_entry_detail(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"去重配置 {entry_id} 不存在或已归档")
     return entry
+
+
+@router.get("/{entry_id}/dataset")
+def get_dataset(
+    entry_id: int,
+    page: int = Query(default=1, description="页码，越界会被拒绝"),
+    size: int = Query(default=20, ge=1, le=200),
+) -> dict:
+    """按业务键顺序分页读取去重明细数据集；页码越界时返回 400 而不是空页。"""
+    if service.get_entry(entry_id) is None:
+        raise HTTPException(status_code=404, detail=f"去重配置 {entry_id} 不存在或已归档")
+    try:
+        payload = service.dataset_page(entry_id, page=page, size=size)
+    except DatasetPageOutOfRange as error:
+        raise HTTPException(
+            status_code=400,
+            detail=f"页码越界：请求第 {error.page} 页，数据集共 {error.page_count} 页（{error.total} 个业务键）",
+        ) from error
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"去重配置 {entry_id} 尚未生成去重明细数据集，请先执行去重或构建明细表",
+        )
+    return payload
+
+
+@router.post("/{entry_id}/dataset/refresh")
+def refresh_dataset(entry_id: int, payload: dict[str, object] | None = None) -> dict:
+    """从目标数据集重新构建去重明细数据集；同一批次重复执行结果保持不变。"""
+    entry = service.get_entry(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"去重配置 {entry_id} 不存在或已归档")
+    batch_id = str((payload or {}).get("batch_id") or "")
+    dataset = service.build_dataset(entry_id, batch_id=batch_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail=f"去重配置 {entry_id} 不存在或已归档")
+    return {
+        "ok": True,
+        "message": (
+            f"去重明细数据集已刷新，共 {dataset.get('key_count', 0)} 个业务键、"
+            f"{dataset.get('retained_count', 0)} 条保留记录"
+        ),
+        "dataset": service.dataset_page(entry_id, page=1, size=200),
+    }
+
+
+@router.get("/{entry_id}/dataset/keys")
+def list_business_keys(entry_id: int) -> dict:
+    """按业务键顺序返回全部业务键的保留记录与去重明细（不分页，供跨模块编排查询）。"""
+    if service.get_entry(entry_id) is None:
+        raise HTTPException(status_code=404, detail=f"去重配置 {entry_id} 不存在或已归档")
+    dataset = service.get_dataset(entry_id)
+    if dataset is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"去重配置 {entry_id} 尚未生成去重明细数据集，请先执行去重或构建明细表",
+        )
+    return {
+        "config_no": dataset.get("config_no", ""),
+        "config_version": dataset.get("config_version", ""),
+        "watermark": dataset.get("watermark", ""),
+        "key_count": dataset.get("key_count", 0),
+        "items": dataset.get("items", []),
+    }
+
+
+@router.get("/{entry_id}/dedup_dataset")
+def get_dataset_alias(
+    entry_id: int,
+    page: int = Query(default=1),
+    size: int = Query(default=20, ge=1, le=200),
+) -> dict:
+    """去重明细数据集的别名入口，与 /dataset 行为一致。"""
+    return get_dataset(entry_id, page=page, size=size)
+
+
+@router.get("/{entry_id}/dataset/keys/{business_key}")
+def get_business_key(entry_id: int, business_key: str) -> dict:
+    """回查单个业务键的保留记录、被淘汰重复记录与冲突说明。"""
+    if service.get_entry(entry_id) is None:
+        raise HTTPException(status_code=404, detail=f"去重配置 {entry_id} 不存在或已归档")
+    item = service.business_key_detail(entry_id, business_key)
+    if item is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"业务键 {business_key} 不在去重配置 {entry_id} 的去重明细数据集中",
+        )
+    return item
 
 
 @router.post("", response_model=ActionResult)

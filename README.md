@@ -74,6 +74,12 @@ npm run dev
   `backend/app/routers/<模块>.py`，业务规则在 `backend/app/services/<模块>.py`。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+- 去重配置按业务键去重后落一份“去重明细数据集”：每条业务键只保留一条可追溯记录，
+  被淘汰的重复记录按原因（保留策略淘汰 / 相同排序时间 / 跨窗口到达）进入明细。
+  数据集可用 `GET /api/dedup_config/{id}/dataset` 分页读取（页码越界返回 400），
+  用 `GET .../dataset/keys/{业务键}` 回查单键结果；明细层同口径入口为
+  `GET /api/dwd_layer/{id}/dedup`。同一批次重复构建复用同一版数据集，
+  业务键数量、保留记录与去重水位保持不变。
 
 领域：数据工程
 子方向：数仓与数据湖

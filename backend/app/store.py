@@ -29,6 +29,8 @@ class Store:
         self._archive_records: list[dict[str, Any]] = []
         # 补数区间记录
         self._backfill_partitions: dict[str, list[dict[str, Any]]] = {}
+        # 去重明细数据集: "dedup_config:id" -> 数据集快照
+        self._dedup_datasets: dict[str, dict[str, Any]] = {}
 
     def module_names(self) -> list[str]:
         return sorted(self._tables)
@@ -165,6 +167,33 @@ class Store:
 
     def get_backfill_partitions(self, job_id: str) -> list[dict[str, Any]]:
         return list(self._backfill_partitions.get(job_id, []))
+
+    # ---- 去重明细数据集 ----
+
+    def _dedup_key(self, config_id: int) -> str:
+        return f"dedup_config:{config_id}"
+
+    def save_dedup_dataset(self, config_id: int, dataset: dict[str, Any]) -> dict[str, Any]:
+        """落一版去重明细数据集；同一配置重复写入会整体覆盖，保证重跑幂等。"""
+        key = self._dedup_key(config_id)
+        record = dict(dataset)
+        record["dataset_version"] = len(self._dedup_datasets.get(key, {}).get("history", [])) + 1
+        history = list(self._dedup_datasets.get(key, {}).get("history", []))
+        history.append({
+            "version": record["dataset_version"],
+            "timestamp": datetime.now().isoformat(),
+            "config_version": record.get("config_version", ""),
+            "row_count": record.get("retained_count", 0),
+            "key_count": record.get("key_count", 0),
+            "watermark": record.get("watermark", ""),
+        })
+        record["history"] = history
+        self._dedup_datasets[key] = record
+        return record
+
+    def get_dedup_dataset(self, config_id: int) -> dict[str, Any] | None:
+        record = self._dedup_datasets.get(self._dedup_key(config_id))
+        return record if record else None
 
 
 store = Store()

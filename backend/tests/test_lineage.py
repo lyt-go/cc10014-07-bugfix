@@ -24,6 +24,7 @@ def reset_store():
     store._snapshot_data.clear()
     store._archive_records.clear()
     store._backfill_partitions.clear()
+    store._dedup_datasets.clear()
 
 
 class TestLineage:

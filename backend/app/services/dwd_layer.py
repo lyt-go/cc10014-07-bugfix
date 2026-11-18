@@ -33,10 +33,36 @@ class DwdLayerService:
             rows = [row for row in rows if row.get("status") == status]
         total = len(rows)
         start = (page - 1) * size
-        return rows[start:start + size], total
+        return [self._with_dedup_summary(row) for row in rows[start:start + size]], total
+
+    def _with_dedup_summary(self, row: dict[str, Any]) -> dict[str, Any]:
+        """列表行带上所消费去重配置的数据集摘要，避免详情页与列表读到旧值。"""
+        item = dict(row)
+        config_no = str(row.get("去重配置") or "")
+        if not config_no:
+            return item
+        config = store.find_by_field("dedup_config", "配置编号", config_no)
+        if config is None:
+            return item
+        dataset = store.get_dedup_dataset(int(config.get("id", 0)))
+        if dataset:
+            item["去重水位"] = dataset.get("watermark", "")
+            item["业务键数量"] = dataset.get("key_count", 0)
+            item["去重明细数据集版本"] = dataset.get("dataset_version", 0)
+            item["去重明细数据集批次"] = dataset.get("batch_id", "")
+        return item
 
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
         return store.find(MODULE, entry_id)
+
+    def get_entry_detail(self, entry_id: int) -> dict[str, Any] | None:
+        """详情读取与列表同源，带上所消费去重配置的数据集摘要。"""
+        entry = self.get_entry(entry_id)
+        return self._with_dedup_summary(entry) if entry else None
+
+    def dedup_config_id(self, entry: dict[str, Any]) -> int:
+        """把明细表上的去重配置编号解析成配置主键；未关联时返回 0。"""
+        return self._resolve_id("dedup_config", str(entry.get("去重配置") or ""))
 
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
         missing = [field for field in REQUIRED_FIELDS if not str(values.get(field) or "").strip()]
@@ -96,23 +122,41 @@ class DwdLayerService:
             c_entry = store.find("cleanse_rule", self._resolve_id("cleanse_rule", cleanse_id))
             if c_entry:
                 ods_data = cs.apply_cleanse(c_entry["id"], ods_data)
-        # 应用去重
+        # 应用去重：同时落一版去重明细数据集，供列表入口和明细层回查业务键结果
         dedup_id = entry.get("去重配置", "")
+        dedup_dataset = None
         if dedup_id:
             from app.services.dedup_config import DedupConfigService
             ds = DedupConfigService()
             d_entry = store.find("dedup_config", self._resolve_id("dedup_config", dedup_id))
             if d_entry:
-                ods_data = ds.apply_dedup(d_entry["id"], ods_data)
+                ods_data, dedup_dataset = ds.deduplicate(
+                    d_entry["id"], ods_data, batch_id=str(entry.get("创建批次", "")))
         # 写入DWD模拟表
         dwd_table = entry.get("表名称", "")
         store.set_table_rows(dwd_table, ods_data)
         entry["刷新水位"] = date.today().isoformat()
+        if dedup_dataset:
+            entry["去重水位"] = dedup_dataset.get("watermark", "")
+            entry["业务键数量"] = dedup_dataset.get("key_count", 0)
+            entry["去重明细数据集版本"] = dedup_dataset.get("dataset_version", 0)
+        # 构建完成即消化掉待刷新标记，避免列表入口继续显示旧值
+        entry["待刷新"] = False
+        entry.pop("刷新原因", None)
         store.save_version(MODULE, entry_id, entry)
         # 注册血缘
         store.add_lineage(ods_table, dwd_table, ods_entry.get("字段列表", ""),
                           transform_logic="清洗+去重", batch_id=entry.get("创建批次", ""))
-        return {"ok": True, "message": f"DWD表 {dwd_table} 已生成，共{len(ods_data)}行"}
+        result: dict[str, Any] = {"ok": True, "message": f"DWD表 {dwd_table} 已生成，共{len(ods_data)}行"}
+        if dedup_dataset:
+            result["dedup_dataset"] = {
+                "config_no": dedup_dataset.get("config_no", ""),
+                "dataset_version": dedup_dataset.get("dataset_version", 0),
+                "key_count": dedup_dataset.get("key_count", 0),
+                "retained_count": dedup_dataset.get("retained_count", 0),
+                "watermark": dedup_dataset.get("watermark", ""),
+            }
+        return result
 
     def _resolve_id(self, module: str, code: str) -> int:
         for row in store.rows(module):
